@@ -1,0 +1,474 @@
+2.4 Fork() and Exec()
+The system calls fork(II) and exec(II) create a new process and load a
+new program. Separating loading and starting a program is unique to
+Unix. It leads to simpler functions and offers more flexibility than
+the traditional approach which lumps both functions in one system call.
+
+2.4.0 Newproc() and swtch().
+You are supposed to understand what is going on in both functions.
+But a famous comment in the swtch() source claims 
+	"You are not expected to understand this"
+So I decided to modify both functions to make them somewhat easier to
+comprehend. These modified sources are discussed in this chapter.
+
+The newproc() function is called by a process running in kernel mode to
+create a new process. Newproc() determines a fresh process ID, locates
+an empty slot in the process table, sets up an entry in the slot, and
+copies its image, that is, its user block, text, data and user stack
+segments into a newly allocated memory area.
+
+As a result, the new process, the "child", differs from its creating
+process, its "parent" only in
+
+- p_pid		(its process id)
+- p_ppid	(the process id of its parent)
+- p_addr	(address of its image)
+- u.u_procp	(address of its entry in the process table)
+
+The newly created process, a.k.a. the "child process", will start
+running when it is selected by the swtch() function.  A process calls
+swtch() when it needs to wait for some event, e. g. I/O completion, and
+just before it returns to user mode.  Furthermore, swtch() is called by
+an ISR when the interrupted process was running in user mode.
+
+A running process is characterized by its PROC-RUN condition. Let p
+point to the process' entry in the process table. Then PROC-RUN reads:
+
+PROC-RUN:
+	KPAR6     = p->p_paddr
+	u.u_procp = p
+
+Note that KPAR6, the kernel mode paging register 6,  selects the user
+block which in turn contains the kernel mode stack area. So, changing
+KPAR6 implies exchanging the stack area. Therefore swtch needs to
+adjust its stack- and frame pointer to the new stack area.
+
+While running under control of the old process, swtch() saves r5 in its
+process table entry. Then swtch() selects the next process to be run
+and establishes PROC-RUN and restores r5 for that process. That is,
+swtch() continues with another frame of the new process.
+
+To save the frame pointer, swtch() calls
+	savfp(&u.u_procp->p_rsav)
+
+savfp() is as simple as it gets:
+_savfp:
+        mov     r5,*2(sp)
+        rts     pc
+
+To establish PROC_RUN and CRET-ENTRY for the next to run process, swtch
+calls
+	retfp(p->p_rsav, p->p_addr)
+
+which is implemented as:
+_retfp:
+        bis     $340,PS		/ set interrupt priority level to seven
+        mov     (sp)+,r0
+        mov     (sp)+,r5
+        mov     (sp),KISA6
+        mov     r5,sp
+        sub     $8.,sp          / TOS in FRAME: tmp,r2c,r3c,r4c,r5c,...
+        bic     $340,PS		/ set interrupt priority level to zero
+        jmp     (r0)
+
+Exercise: Why is it absolutly necessary that retfp protects itself from
+being interrupted?
+
+Exercise: Why does retfp save its return address in r0 instead of
+keeping it on the stack and returning with an rts instruction?
+
+Note that swtch() neither saves nor restores the stack pointer. Instead
+retfp computes it from r5 according to the FRAME condition that holds
+with no auto variables.
+
+When the child process starts running the first time, u.uprocp points
+to its parent's entry instead of to its own entry, thereby breaking
+PROC_RUN. To fix, swtch sets u.uprocp to its own entry.
+
+After establishing PROC_RUN, swtch calls sureg to restore the user mode
+paging registers from values saved in the user block.
+
+When setting up the process table entry for the new process, newproc()
+saves its framepointer in p_rsav of the new process. This effects that
+swtch() returns to the caller of newproc() when the new process starts
+running.  Up to now, parent and child have no way to determine which is
+which since the child is a duplicate of parent. To help out, newproc()
+returns 0 and swtch returns 1, leading to the pattern
+
+	statements executed by parent
+	if (newproc()) {
+		statements executed by child only
+	} else {
+		statements executed by parent only
+	}
+	statements executed by both
+
+A similar pattern applies when calling fork() in user mode: fork() returns
+the child's process ID when executed by the parent and zero when executed
+by the child.
+
+When the child process starts running the first time, u.uprocp points
+to its parent's entry instead of to its own entry, thereby breaking
+PROC_RUN. To fix, swtch sets u.uprocp to its own entry.
+
+Exercise: What's wrong with this version of swtch()?
+swtch()
+{
+	struct proc *p;		/* proc entry of next process */
+	...			/* look for next process to be run */
+	retfp(p->p_rsav, p->p_addr);
+	u.uprocp = p;
+	sureg();
+	return 1;
+}
+
+2.4.1 Expand and Swtch
+When a process wants to expand its own image but is short of memory, it
+swaps out itself and then calls swtch() to transfer to some other
+process. The process will then be swapped in by the swapper as soon as
+there is enough memory and be continued when swtch() decides to.
+This is not as simple as it sounds! The kernel stack is part of the
+process' image and is constantly changing as long as the process runs.
+After the process initiated the swap I/O the image will be copied to disk
+while the contents are changing. This is an example of a "race condition",
+that is the outcome depends on who is first.
+
+expand()
+{
+	...
+	initiate to swap out the own image
+	...
+	swtch()
+	continue after being swapped in with greater image.
+	...
+}
+
+The disk driver might copy before swtch() is called or after swtch() is
+called. The first case means trouble, since the frame of swtch will not
+be saved to disk. In the first case, the frame pointer as saved by
+swtch will not be valid when the process continues after being swapped
+in again. To solve this problem, swtch must not save its frame pointer,
+but the frame pointer of expand(), that is the previous frame pointer.
+This is save, since the previous frame is valid all the time.
+The argument pfp controls which frame pointer to save:
+
+swtch(pfp)
+{
+	...
+        if (pfp)
+                savpfp(&u.u_procp->p_rsav);
+        else
+                savfp(&u.u_procp->p_rsav);
+	...
+}
+
+Of course, as you might guess, swtch(1) will not return to its caller,
+but to the caller of its caller.
+
+2.4.2 Exec()
+Exec() replaces its text- and data segments by the ones loaded from the
+program file, the name of which is passed as the first argument to the
+system call. The second argument of exec() is a zero terminated array
+of character pointers, which point to zero terminated arrays of
+characters, the "arguments", that are to be passed to the program.
+
+Exec() sets the user mode paging registers to point to the newly loaded
+segments.
+
+Whenever an interrupt or a system call happens, an ISR wrapper routine
+pushes all registers on the kernel stack before calling the ISR
+respective system call. On return the wrapper routine restores the
+registers from the stack.  Exec() clears all saved values except the
+user mode stack pointer, which is initialized to point to the arguments
+to be passed to the program.
+
+Exercise: Which program entry does exec() assume?
+Answer: Zero, since the PC is set to zero.
+
+Exec() does not create a new process, per process data remain unchanged.
+In particular these include:
+- p_pttyp		(device ID of controlling terminal)
+- u_ofile		(array of open files, indexed by file descriptors)
+- u_cdir		(current directory)
+- u_uid, u_gid		(user and group ID)
+
+A tty driver sends hangup, interrupt and quit signals to all processes
+it controls. A process gets controlled by a terminal the first time, it
+opens it. A process never gets rid of its controlling terminal.
+Successive opening of other terminals do not change the controlling
+terminal.
+
+An 'open file' is a file, i. e. an inode, together with its current
+file position.
+
+The current directory comes into play, whenever a file name is to be
+resolved to an inode. If the name starts with an '/', the root
+directory is searched for, otherwise the current directory. A '/'
+allone means the root directory itself and an empty filename means the
+current directory itself.
+
+A file gets the user and group ID of the process that created the
+file.  The permissions to read, write and execute a file are defined in
+three sets. One sets applies, when the user ID of file and process
+match, another set applies, when the group IDs match and a third set
+applies, when neither group ID nor user ID match.
+
+There are two exec() wrappers in the C-library, execl and execv. They
+are called like:
+	execl(filename, arg0, arg1, ..., argn, 0);
+and
+	execv(filename, argv);
+Here filename is a character pointer to the program's name, argv is a
+zero terminated array of character pointers, and arg0, arg1, ...  are
+character pointers.
+
+Both execl and execv pass the filename as the first parameter to
+exec().  Execv passes argv as the second parameter, whereas execl
+passes the address of arg0 as the second parameter. Execl can only be
+used when the number of arguments is known at coding time. It saves you
+building the argv array. Otherwise, execv() must be employed.
+
+In either case, the user stack of the new program will be initialized to:
+INIT-STACK:
+	n+1, arg0, arg1, ..., argn, -1, chars0, chars1, ..., charsn
+	*arg0 = first character of chars0
+	*arg1 = first character of chars1
+		...
+	*argn = first character of charsn
+
+chars0, ... charsn stand for the null terminated arrays of characters
+whose addresses were passed to exec() in the argv array.
+If the total length of the strings is odd, an extra null character is
+appended to charsn.
+
+All C programs start with crt0, the C runtime starter, at address
+zero.  It inserts an argv parameter into the stack before calling the C
+function main(). argv is the address of arg0.
+
+MAIN-STACK:
+	n+1, argv, arg0, ...., argn, -1, chars0, ... charsn
+	*argv = arg0
+
+This way, main() only needs a fixed number of parameters, namely the
+argument count (n+1) and the argument vector (argv) to access all
+arguments.
+
+Exercise:
+Consider the program a which executes program b:
+a.c:
+	main()
+	{
+		execl("/home/helbig/b", "hello", " world", 0);
+	}
+b.c:
+	main(argc, argv)
+	int argc;
+	char *argv[];
+
+	{
+		printf("address of:\n");
+		printf("argv: %d\n", 	 &argv);
+		printf("arg0: %d\n", 	  argv);
+		printf("chars0: %d\n",	 *argv);
+		printf("arg1: %d\n",	  argv+1);
+		printf("chars1: %d,\n",	*(argv+1));
+
+		printf("contents of:\n");
+		printf("chars0: '%s'\n",  *argv);
+		printf("chars1: '%s'\n", *(argv+1));
+	}
+What are the addresses as printed by b?
+
+Answer:
+The stack just before main is called by crt0 looks like this:
+	2, argv, arg0, arg1, -1, 'hello', ' world'
+Taking into account that an extra null character is appended to chars1,
+you compute:
+
+	item	length	address		printed value
+	chars1	7	2^16-8		-8		
+	chars0	6	2^16-14		-14
+	-1	2	2^16-16		-16
+	arg1	2	2^16-18		-18
+	arg0	2	2^16-20		-20
+	argv	2	2^16-22		-22
+
+The "-1" on the stack is used by ps(I) to find the beginning of chars0,
+when it prints the command of a process. 
+Exercise: Assume, zero instead of '-1' is the value that exec inserts
+as the start marker.  ps searches the start marker beginning at the right end
+of the stack. What would be the "command" as printed by ps for a
+process executing b?
+
+Answer: Nothing, if an extra null character was appended for even
+length padding, since then the null character terminating charsn and
+the extra null character combine as a zero valued integer, which will
+then be interpreted as the start marker by ps. All this trouble can be
+solved, if exec would append a '1' character for even length padding.
+
+When the shell executes a command, it sets each entry in the argument
+vector to the "words" of the command. E. g. if the command reads
+	% a hello world
+the three words "a", "hello", and "world" are passed. Its file name, in
+our case "/usr/helbig/a", is not passed to the program.
+
+Exercise: The linked list of frames of a C user program is terminated
+by a certain value of the frame pointer. Which value and why.
+
+Answer: The value is zero. Exec clears r5, which is the frame pointer
+as saved in main's frame.
+
+2.4.3 Exit() and Wait()
+If a process is done or terminated by a signal, it calls exit() which
+swaps out its user block, frees all memory and notifies its parent.
+Exit() does not yet clear its entry in the process table, which is
+still needed to pass information to the parent process, when it
+executes wait().  Exit() has one argument, the 'status', that is passed
+by wait() to the parent process. This way, the child passes information
+to its parent.
+
+The wait() call waits for the termination of one of its children. It
+returns three values:
+- the process ID of the terminated child,
+- the 'status' as passed to exit,
+- the signal number, if the child was terminated by a signal, or zero
+  otherwise.
+
+Finally, wait() releases the process table entry and frees the user
+block of the terminated child. So, if a process terminates without
+waiting for each of its children, the process table will be filled with
+entries of terminated process, a.k.a "zombies". To avoid this, exit()
+sets the parent of each of its children to '1', the process ID of the
+init process.  To take care of orphaned terminated children, init may
+never terminate itself and must repeatedly call wait.
+
+2.4.4 Initializing and running the multiuser service.
+Multiuser service means that several users may authenticate themselves,
+start programs and leave the system when done.
+
+In Unix v6, the course of action is:
+- swapper process:
+This process is the first process and the ancestor of all other
+processes. It is the only process, which is not created by newproc(). It
+is its own parent. It is never swapped out and it never runs in user
+mode. It creates the init process and then waits in a loop for
+processes to be swapped in or out. The swapper initializes itself to:
+
+controlling terminal:	none
+open files:		none
+current directory:	"/"
+user and group ID:	zero, that is "root".
+
+- init process:
+The init process creates a text segment and copies a small machine program
+into it:
+
+	execl("/etc/init", "/etc/init", 0);
+	for (;;);
+
+Then init enters user mode with the PC set to zero, thus executing the
+above program.
+
+If "/etc/init" does not exist, Unix will loop for ever with two
+processes -- not very exciting.
+
+"init" starts with  creating a new process, called "init2", and waits for
+for completion of "init2".
+
+- init2 process:
+init2 wants to execute the shell which assumes the first two file
+descriptors ("standard in" = 0, "standard out" = 1, and "standard
+error" = 2) to be valid, that is point to open files.
+
+Therefore init2 opens "/", which sets standard in, and duplicates it by
+calling dup(), to let the standard out file descriptor point to the
+same file. With these settings, init2 calls
+
+	execl("/bin/sh", "/bin/sh", "/etc/rc", 0);
+
+The shell then executes its argument, the file "/etc/rc", which
+reads on my system:
+	rm -f /etc/mtab
+	/etc/update
+	/etc/mount /dev/rk1 /usr/source
+	rm -f /tmp/*
+
+These commands are run with the settings: 
+
+controlling terminal:	none
+open files:		"/etc/rc", "/", "/"
+current directory:	"/"
+user and group ID:	zero, that is "root".
+
+The shell sets the standard input to the command file and calls dup(1)
+to set the standard error descriptor. The other settings are still
+inherited from the swapper process.
+
+Daemons like /etc/update should be run without a controlling terminal,
+so they won't be killed by signals sent from a tty.  Update loops,
+calling sync() every 30 seconds to flush buffer contents to disks.
+Before looping, update forks. The parent process exits without waiting.
+The child process loops. This idiom is typically for daemons: It
+lets the shell continue after starting the daemon.
+Daemons should not use the inherited file descriptors if started by
+/etc/rc. Writing to "/" is not possible.
+
+When the shell executed the last command, it exits from the init2
+process and its parent, the init process, continues.
+
+- init process:
+It reads the file /etc/ttys into a tty-table. Thise file specifies for
+each terminal device file whether or not it is to be served. For each
+such device file, init creates a tty process, remembers its process id
+in the tty table and then loops waiting for termination of child
+processes.  When one does, it uses the child's process id to locate its
+entry in the tty-table, forks a new tty process for this entry and
+continues waiting.
+
+- tty process:
+This process modifies the process settings to:
+controlling terminal:	/dev/ttyx	(as specified by tty table)
+open files:		/dev/ttyx, /dev/ttyx
+current directory:	"/"
+user and group ID:	zero, that is "root".
+
+It then changes permission and owner of the terminal, such that only
+root can read from it befor executing /etc/getty with:
+	execl("/etc/getty", "-", com, 0);
+Com is a one character string that is taken from /etc/ttys and used by
+getty to identify the communication parameters of the terminal line,
+like baud rate, number of stop bits, etc. Gettys task is to configure
+the terminal. It does so by trying different settings writing "login:"
+and reading the user name. When getty thinks, the terminal settings are ok,
+the tty process executes the login program:
+	execl("/bin/login", "login", name, 0);
+passing the user name as an argument.
+
+The login program reads the file /etc/passwd, locates the user's
+entry and asks the user to type in a password. It encodes the password
+and compares with the one from /etc/passwd. If valid, it sets the process
+uid, gid and cdir from /etc/passwd before it finally executes the program
+as specified in /etc/passwd, which is usually "/bin/sh".
+	execl(program, "-", 0)
+
+The shell, still executed by the tty-process, calls dup(1) to set file
+descriptor 2 to the terminal and starts reading and executing command lines.
+The shell is executed with these process settings, which are inherited by
+its children.
+
+controlling terminal:   /dev/ttyx       (as specified by tty table)
+open files:             /dev/ttyx, /dev/ttyx, /dev/ttyx 
+current directory:      user's home	(as specified by /etc/passwd)
+user and group ID:      as specified by /etc/passwd
+
+
+The following table relates processes to processes they create and to
+programs they execute in user mode.
+
+process		creates process		executes program
+swapper		init			-
+init		init2, tty processes	icode,	/etc/init
+init2		-			/bin/sh
+tty processes	-			/etc/getty, /bin/login, /bin/sh
+
+This table again stresses the difference of 'process' and 'program'.

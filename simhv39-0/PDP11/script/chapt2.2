@@ -1,0 +1,474 @@
+Chapter 2.2 Dynamic Memory Allocation.
+
+2.2.0 Memory allocation
+The low clicks of memory are allocated to the text and data segment of
+the kernel -- as dictated by the hardwired address mapping. The
+remaining memory is allocated to processes as one contiguous range of
+clicks per process, starting with the user block and followed by memory
+allocated to user text, data, and stack. A block of contiguous clicks
+is called a "lump" (in this script only). The number of its first click is
+its "address".
+
+Address and size of the lump allocated to a process is kept in its
+entry in the process table. (See /usr/sys/proc.h; p_addr and p_size,
+both as clicks)
+
+Exercise:
+The memory allocated to a process starts at click 02000, the size of
+its user text is 010030 byte, the size of its user data 0500 bytes.
+The initial user stack size is 20 clicks and the size of the user block
+is 1K byte. The type of the user program is executable.  How many
+clicks will be allocated for this process initially?  Describe the
+contents of the user page registers and kernel PAR6.
+
+Answer: The number of clicks allocated to the process are:
+user-block:  1K byte = 16 clicks = 	  020 clicks 
+text/data: 010030 + 0500 = 010530 byte = 0106 clicks (rounded up!)
+stack:     20 clicks = 			  024 clicks
+sum:     				 0152 clicks
+
+Contents of paging register:
+space	page	PAR	size PDR.size PDR.upart  PDR.wacc  PDR.racc
+kernel 	6 	02000 	 020	  017	 false	    true      true
+user    0	02020	0106	 0105	 false	    true      true
+user	7	02126	 024	 0154	 true	    true      true
+
+All other user paging register in user paging register are invalid.
+
+Lumps that are currently not used are represented by an array, the
+"map". Each two-word-entry of a map holds address and size of a free
+lump. (See struct map in /usr/sys/ken/malloc.c). The list of used
+entries in a map is terminated by an entry with size = 0.  The map is
+implicitly initialized, in particular, its first entry is zero, thus
+marking the end of an empty list. This reminds of character strings in
+C, where the empty string is represented by 0.
+
+The map is accessed exclusively by 
+	mfree(map, address, size)
+and
+	address malloc(map, size).
+
+Mfree() enters a lump of free memory into the map. If the preceeding or
+following memory areas turn out to be free, mfree() combines the
+corresponding neighbouring lumps with the new lump.
+
+Malloc() searches the map for a free lump with at least the size
+requested and returns its address after adjusting size and address of
+the remaining free lump. If it turns out to be empty, malloc() removes
+its entry from the map.  Malloc() returns zero, if there is no free
+lump that is big enough.
+
+The file /usr/sys/ken/malloc.c hides the implementation of dynamic
+memory allocation from the rest of the kernel. It keeps the definition
+of a map entry (struct map) private. Including comments the source is
+only 87 lines. It is the clients responsibility to provide empty maps
+that are large enough. Mfree() and malloc() work independently of the
+units of memory. The only condition is that the unit of addresses must
+match the unit of sizes.
+
+2.2.1 Swapping
+If the size of all lumps exceeds available memory, the image of a
+process is written onto disk and the memory is mfree'd to be allocated
+to other processes. This is called "swapping". To continue a swapped
+out process, its image needs to be reloaded.
+
+Shared text segments do not need to be swapped out with the image of
+every process using it, instead it suffices to be swapped ones for all
+processes using it.  This saves considerable swapping I/O and was the
+incentive to introduce the pure executable format. Candidates for this
+format are programs that tend to be executed concurrently by more than
+one process. In V6 a
+
+	# chdir /bin
+	# file * | grep pure
+yields
+	as:     pure executable
+	bas:    pure executable
+	cc:     pure executable
+	ed:     pure executable
+	ld:     pure executable
+	ls:     pure executable
+	sh:     pure executable
+	#
+
+Swapping is done by one dedicated process, the "swapper", which is the
+first process to be created during initialization of the kernel.  The
+swapper is a special process in that it will never run in user mode; it
+follows that its lump consists of the user block only. The swapper will
+never be swapped out, if so, this would be about the last thing, the
+swapper would do.
+
+When a process switches to another process, it does not do so directly
+but instead switches to the swapper, which will then look in the
+process table for another process to be continued. If there is none,
+the swapper will loop waiting for an ISR to wake up a process.  If the
+image of the awakened process is loaded, the sapper will switch to it
+right away. Otherwise it will try to swap in the process, possibly
+after having swapped out other processes to free the memory needed for
+the new process.
+
+Later versions of Unix, notably BSD Unix, introduced a more
+sophisticated memory management scheme called "paging". Then a process
+can run even with only part of its image loaded, whereas with swapping,
+a process can run only if all of its image is loaded.
+
+Exercise:
+In V6, two resources limit the size of a program, i. e. a program
+cannot be executed if its size exceeds one of these limits. What are
+these resources?
+
+The amount of installed memory is not to be configured by the user;
+instead the kernel determines it automatically. In a loop it probes
+clicks with increasing click numbers until a trap at 4 is executed,
+which means in this case that the memory does not exist.  A click is
+probed by putting its number in the user PAR0 and executing
+	mfpi	 0
+
+Every successfully probed click is entered into the map of free lumps by
+	mfree(map, click number, 1).
+
+The kernel prints the amount of memory that is left after allocating
+its own segments and the user block of the swapper.
+
+Exercise:
+My kernel prints "mem = 1040" in units of 1/10th K words.  The size of
+this kernel is 39934 as printed by size(I). How much memory does the
+kernel believe is installed? How much memory does SIMH provide? Explain
+the difference.
+
+Answer:
+Taking into account that memory is allocated at click boundaries, you
+calculate:
+Clicks installed by SIMH:           256 * 1024 / 64 = 4096.
+Clicks used by the kernel: (39934 + 1024 + 63) / 64 =  640.
+Free clicks: 			  (104 * 2048) / 64 = 3328.
+Difference:			  4096 - 640 - 3328 =  128.
+
+128 clicks, which are 8K bytes, are not accessable, since the last page
+of bus addresses is mapped to I/O devices, leaving only 248K of bus
+addresses to be usable to access memory.
+
+The disk area to be used for swapping needs to be configured in
+/usr/sys/conf/c.c. Mkconf takes the first block device in its parts
+list to be the swap device and  allocates the blocks in the range
+[4000, 4872) to swap space.
+
+The free blocks in the swap space are represented by an array, the
+swapmap, that is accessed by the same functions that are used for
+maintaining free memory, namely mfree() and malloc(). The addresses in
+the swapmap mean block numbers instead of click numbers and the unit of
+the size is 512 instead of 64. The map representing lumps of free
+memory is called the coremap.
+
+Exercise:
+In c.c a comment warns that the swap area must not begin with disk block
+number zero. Why?
+
+Exercise:
+Code a call of mfree(), such that the swapmap will represent one free lump
+with size nswap and address swplo.
+
+These two lines from c.c show how variables are explicitly initialized
+in C, i. e. there must be no "=" sign.
+
+int	swplo	4000;
+int	nswap	872;
+
+A device is specified by a major and a minor number. They are word encoded
+as the high respective low byte. Here is the line in c.c as created by mkconf:
+
+int     swapdev {(0<<8)|0};
+
+In C the initializer must be surrounded by curly braces if it is a
+constant expression. Only with simple constants the braces may be
+omitted.
+
+Exercise:
+Code an initializer for swapdev that specifies the second RK disk to
+hold the swap area.
+
+2.2.2 The sizes of swapmap and coremap.
+The coremap and the swapmap are defined in /usr/sys/systm.h.  Since the
+struct map, which defines an entry of a map, is private to malloc.c, it
+cannot by used in systm.h. The maps are therefore defined as arrays of
+integer. The sizes of the process table and the map arrays are
+configured by C symbols, which are #define'd in /usr/sys/param.h, with
+NPROC=50, CMAPSIZ=100 and SMAPSIZ=100; unfortunately without a hint
+regarding the relation of the map sizes to the size of the process
+table. So a map can hold up to NPROC-1 lumps -- remember, one entry is
+needed to terminate the list of occupied entries.
+
+To determine the size of the maps, we need to determine an upper bound
+of the number of free lumps ever managed by one map. It seems easier to
+determine an upper bound of allocated lumps. Property(0) relates both
+numbers:
+
+(0)	If at least one lump is allocated, the number of free lumps
+	is bounded by the number of allocated lumps plus one.
+
+First, we prove property(0), whose wording is somewhat clumpsy. To
+arrive at a simpler statement, just define the (nonexisting) lump
+adjacent to the rightmost free lump to count as allocated.
+Furthermore, we define free lumps to be 'white' and allocated lumps to
+be 'black'.
+
+With this convention, (0) reads:
+(1)	The number of white lumps is bounded by the number of black lumps.
+
+We are now going to prove (1) by showing that property (2) is an
+"invariant", that is it holds initially and is maintained by malloc()
+and mfree().
+
+(2)	The right neighbour of every white lump is black.
+
+Property (2) holds initially:
+After initialization, there are no white lumps, so (2) is valid.
+
+If (2) holds before malloc() is called, it holds after malloc()
+returns:  Malloc() allocates a lump. In particular, the neighbours of
+all white lumps remain black.
+
+If (2) holds before mfree() is called, it holds after mfree() returns: 
+Since mfree() combines the new white lump with its white neighbours, the
+right neighbour of the resulting white lump is black.
+
+This completes the prove of (1) and (0).
+
+Exercise:
+From property (2) one is tempted to infere that the number of white
+lumps equals the number of black lumps.  But this does not hold.
+Why?
+
+Exercise:
+Would malloc() still maintain property(1) if it would cut the lump to
+be allocated from the right end of a white lump or from the middle?
+Assume, that the size of the white lump exceeds the requested size.
+
+To determine A, the upper bound of concurrently allocated lumps, we
+start with grep(I) to find the six places in the kernel that call
+malloc():
+
+function	allocates a lump for ...
+newproc()	... a newly created process.
+sched()		... a process that is swapped in or out.
+expand()	... itself, when it needs more memory.
+exit()		... swapping out the user block. 
+xswap()		... swapping out a process.
+xalloc()	... the text segment of pure executables.
+
+Newproc() allocates a lump for every newly created process. Since we have
+at most NPROC processes, including the swapper process, whose lump is
+never allocated from a map, we arrive at A <= NPROC-1.
+
+Expand() is called when a process needs to grow its memory. It
+allocates a lump with the new size, copies the old lump to the new lump
+and then frees the old lump. While copying there are two lumps
+allocated simultaneously. Since at most one process is copying its lump
+at a time, we conclude that A <= NPROC. Here we exploit the fact that
+processes in kernel mode are not preempted.
+
+Xalloc() allocates a lump for each shared text segment stemming from pure
+executables. At most NTEXT shared text segments can be active
+concurrently, so A <= NPROC + NTEXT.
+
+The remaining three functions never allocate more than one lump
+for the same process in one map, so A <= NPROC + NTEXT.
+
+The maximal number of free lumps, F, satisfies
+	F <= NPROC+NTEXT+1
+because of (0).
+
+It might be possible to prove that F is slightly less than that. But
+this would assume more details of when and how the kernel allocates
+respective frees lumps. It seems better to avoid complicating stuff and
+accept some waste of memory.
+
+Exercise: Show that F = NPROC+NTEXT+1, by constructing a pathological example.
+Answer: Set NPROC=2, NTEXT=0. Assume, that the one lump allocated for
+the one and only user process is shrinked at both ends. This gives you
+two free lumps. Then, the process calls expand(), allocating the new
+lump in the middle of one of the free lumps. During copying, three free
+lumps need to be managed by the map.
+
+Taking into account the end marker in the array, we arrive at S, the size
+of a map to be:
+	S = F+1 = NPROC+NTEXT+2
+
+This is quite different from the sizes as configured in V6, with S = NPROC!
+But even so V6 was in widespread use, the maps didn't seem to overflow.
+
+But I feel more comfortable to run a system from which I know that the
+maps won't overflow. While fixing that, we can configure better values for
+NPROC and NTEXT as well.
+
+NTEXT is defined in param.h as 40. That seems rather generous! In fact,
+it exceeds the total number of pure executables in V6: This command
+prints one line for each pure executable:
+
+	find / -exec file {} \; | grep pure 
+
+Piping the above command to wc(I) yields 19 lines. Using the fact, that
+there is at most one shared segment per pure executable, NTEXT=19 would
+be enough. These settings should suffice and avoid overflow of the
+maps:
+
+	#define	NTEXT	 19
+	#define	NPROG	 40
+	#define CMAPSIZ 122
+	#define	SMAPSIZ 122
+
+It would be far better to configure CMAPSIZ and SMAPSIZ in terms of NTEXT
+and NPROC, like:
+	#define CMAPSIZ ((NTEXT + NPROG + 2)*2)
+	#define SMAPSIZ CMAPSIZ
+But the V6 C-preprocessor does not rescan the replacement string for
+defined identifiers. This is fixed in V7 C.
+
+While tuning the kernel parameters, one wonders what happens if any of
+those parameters are too small. Well, it depends:
+
+NPROG: The kernel will check if the process table is full before
+creating a new process. If so, it sets the error number accordingly
+(EAGAIN, see INTRO(II) for the meaning of error numbers), and continues
+without creating the process.
+
+NTEXT: This is the size of the array "text", defined in
+/usr/sys/text.h. It has one entry per active text segment. If this
+table runs out of free entries while loading a pure executable, the
+kernel will "panic", that is, print a message on the console, in this
+case "out of text", and stop.  (see /usr/sys/ken/text.c)
+
+CMAPSIZ, SMAPSIZ: The mfree() function does not even check for overflow
+when inserting another free lump. So anything might happen if CMAPSIZ
+or SMAPSIZ are too small. It will be very hard to pinpoint the cause of
+erratic behaviour in that case.
+
+On first sight, these different attitudes towards robustness seem
+randomly.  But they can be viewed as the result of carefully
+considerating the tradeoffs of robust code vs. simple code. The design
+of Unix is governed by a strong appreciation of simple, clear code. If
+it's easy to recover from an error, the kernel will recover. Otherwise,
+if it's easy to detect an error condition, it will panic. If even
+detecting is hard, as is the case with the overflow of maps, it won't
+even do that. This is justified by the fact that errors in Unix are
+very rare -- a direct consequence of the code being simple.
+
+2.2.3 Makeing changes in param.h effective
+Every source file that #include's param.h needs to be recompiled --
+that is done by /usr/sys/run -- and the resulting *.o files need to be
+archived in lib1 respective lib2 -- that is not done by /usr/sys/run!
+
+To update the libraries, use
+	ar r ../lib1 *.o
+in /usr/sys/ken respective
+	ar r ../lib2 *.o
+in /usr/sys/dmr.
+
+With new objects in the libraries, build a kernel in /usr/sys/conf.
+You may want to use /usr/sys/run for guidance. Install the kernel as
+/unix so you won't overwrite /rkunix and reboot. (remember sync!)
+
+Exercise:
+The ps(I) command will show spurious processes. Why?
+
+Answer:  The file ps.c #includes param.h using NPROC to determine the
+size of the process table. This is the only userland program that needs
+to be recompiled when param.h is changed.
+
+By the way, the only other userland program that includes param.h is
+the C debugger, cdb(I).
+
+Compiling kernel sources is automated by three shell scripts that I
+added to the system.  The scripts dmr/run and ken/run compile C files
+supplied as arguments on the command line and archive the objects in
+the libraries.
+
+The script conf/run assembles and compiles sources from the conf
+directory, links them with the libraries and installs the linked
+kernel.
+
+Here is ken/run:
+
+: loop
+if $1x = x goto done
+cc -O -c $1
+shift
+goto loop
+: done
+ar r ../lib1 *.o
+rm *.o
+
+and here conf/run:
+
+as m40.s
+cp a.out m40.o
+cc -c c.c
+as l.s
+ld -x a.out m40.o c.o ../lib1 ../lib2
+cmp a.out /unix
+cp a.out /unix
+rm c.o
+rm m40.o
+rm a.out
+
+Exercise: Give the commands to recompile all kernel sources.
+Answer:
+chdir /usr/sys/ken
+run *.c
+chdir ../dmr
+run *.c
+
+2.2.4 Implementation of swap():
+If the swapper decides to swap out a process, it takes address and size
+of its lump from the process table (p_addr and p_size), malloc's()
+swapspace and mfree's() the memory. Finally, it sets p_addr to the
+block number of the swapped out lump. It uses the function
+	swap(blkno, coreaddr, count, rdflg) from /usr/sys/dmr/bio.c.
+The unit of coreaddr and count is click. The rdflg controls the
+direction of the transfer, "on" indicates from disk to memory.
+
+Exercise:
+Write a C program swapout(p) that swaps out a process, with p pointing
+to its entry in the process table.
+
+Answer:
+swapout(p)
+struct proc *p;
+{
+	int daddr;
+
+	daddr = malloc(swapmap, (p->p_size + 7)/8);
+	swap(daddr, p->p_addr, p->p_size, 0);
+	p->p_addr = daddr;
+}
+
+Exercise:
+Write a C program that sets the I/O register (RKCS, RKWC, RKBA, RKDA)
+of the RK drive to start  swap I/O. Use the parameters as given to
+swap() and the external variable swapdev defined in c.c.
+Refer to pdp11/doc/devs for the specification of the RK11 device.
+
+Answer:
+	...
+#define RK 0177404	/* address of RKCS, control and status register */
+	...
+
+struct {
+        int rkcs;
+        int rkwc;
+        int rkba;
+        int rkda;
+};
+
+swap(blkno, coreaddr, count, rdflg)
+{
+	
+	RK->rkba = coreaddr << 6;	  /* lower 16 bits of bus address */
+	RK->rkcs = (coreaddr >> 11) << 4; /* upper 2 bits  of bus address */
+	RK->rkwc = -count * 32;	          /* complement of word count */
+	RK->rkda = blkno % 24; 		  /* head and block */
+	RK->rkda =| (blkno / 24) << 5;	  /* track */
+	RK->rkda =| (swapdev & 7) << 13;  /* disk */
+	RK->rkcs =| 1<<6;		  /* interrupt enable */
+	RK->rkcs =| (rdflg ? 5 : 3);	  /* read/write and go */	
+}

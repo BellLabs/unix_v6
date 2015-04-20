@@ -1,0 +1,622 @@
+2.3 Dynamic Memory Allocation with the Stack
+
+The stack is used to allocate memory.  In contrast to a general
+allocation algorithm, e. g. malloc() and mfree(), a stack can be
+employed whenever the
+
+STACK CONSTRAINT:	last allocated -- first freed
+
+is acceptable. This contstraint is exploited to arrive at a very fast
+algorithm.
+
+The stack consists of a memory area and a stack pointer. The stack
+pointer divides the area in a free and an allocated part. Let the
+memory at [m, n) be reserved for the stack.  If the stack "grows
+downward", as is dictated by the PDP-11, the area at
+
+	[m, sp) is free, and at
+	[sp, n) is allocated.
+
+Memory is freed by incrementing the stack pointer ("pop") and allocated
+by decrementing the stack pointer ("push").
+
+Exercise: Characterize 
+	a) an empty stack
+	b) stack overflow
+	c) stack underflow
+by equations involving m, n and sp.
+
+Exercise: Give an expression that evaluates to the address of the
+last allocated memory word.
+
+2.3.0 Subroutine Calls
+When a subroutine is called, the return address needs to be stored
+somewhere.  In ancient times, a fixed location per subroutine is
+allocated to the return address. This place is usually in the program
+text, e.g.  in a jmp instruction, which is then executed on return.
+This technique has two disadvantages:
+
+- The code is modified, ruling out read only code as in pure executables
+  or ROMs.
+- A subroutine with self modifying code is not reentrant. In particular,
+  this means, that only one process at a time can call the routine.
+  Furthermore, those subroutines cannot be called recursivly, even with
+  only one process active.
+
+Both problems are solved, when memory is allocated to the return
+address only when the subroutine is called. Since a subroutine only
+returns after all nested subroutines have finished, the stack
+constraint holds, and thus a stack suffices to allocate memory.  This
+is exactly what the PDP-11 instruction set supports, as opposed to
+older architectures like IBM mainframes.
+
+Unix C programs not only allocate the return address from the stack,
+but all items whose lifetime is limited by the activation time of a
+subroutine. These are
+
+- arguments passed to functions
+- return address
+- the caller's register values, that need to be restored on return.
+- automatic variables
+- intermediate results while evaluating expressions.
+
+In the following the conditions to be established by the caller and
+callee are given.  The top of the stack is notated as a comma separated
+list of the allocated items.  The size of each item is one word. This
+is true when ignoring double arguments, which are four words long. "ra"
+denotes the "return address".
+
+When passing n arguments to a function, as in f(arg1, arg2, ..., argn),
+the CALL condition reads:
+
+CALL:
+Top of stack:	ra, arg1, arg2, ..., argn
+
+Note that the above condition implies sp = &ra.
+
+Exercise: Write an assembler program that establishes CALL
+for this invokation of printf().
+
+	...
+	printf("a: %d, b: %s:\n", a, b);
+	...
+
+Assume that the symbols "fstring", "_a", "_b" and "_printf" are of type
+"data address" respective "text address" with the following values:
+
+name		value
+fstring 	address of the format string
+_a		address of a
+_b		address of a word containing the address of b
+_printf 	entry of printf
+
+The underlines are prefixed by the C compiler to names defined in C
+sources.
+
+Answer:
+	mov	_b,-(sp)
+	mov	_a,-(sp)
+	mov	$fstring,-(sp)
+	jsr	pc,_printf
+
+The RETurn condition is to be established by the callee whenever it
+returns.
+
+RET:
+Top of stack:	arg1, arg2, ..., argn
+reg values:	r0=return value; r2, r3, r4, r5 = r2c, r3c, r4c, r5c; pc=ra
+
+Here, r?c denotes the value of r? at the time the subroutine was called.
+
+2.3.1 The stack frame in C programs.
+The above conditions need to be met by the caller or the callee
+whenever at least one of them are C functions. The other one might be
+written in assembler.
+
+In this section we learn how C functions manage the stack.
+
+C functions use r0 and r1 to hold temporary values which need not to be
+restored by the callee, whereas registers r2, r3, and r4 are allocated
+to variables of storage class register.
+
+C programs save and restore registers by calling the assembler routines
+csv resp. cret. A C function always starts with the instruction
+	"jsr r5,csv"
+which establishes the entry condition of csv:
+
+CSV-ENTRY:
+top of stack:	r5c, ra, arg1, arg2, ..., argn
+reg value:	r5 = return address from csv
+
+CSV pushes registers and an extra word onto the stack, so on return
+from csv the CSV-EXIT condition holds:
+
+CSV-EXIT:
+top of stack:	temp1, r2c, r3c, r4c, r5c, ra, arg1, arg2, ..., argn
+reg value:	r5 = &r5c.
+
+The function body stores automatic variables and temporary values on
+the stack. Temporary values include arguments and return addresses for
+nested calls. Note, that csv pushes one extra word onto the stack ready
+to hold one temporary word. Further temporaries are to be pushed and
+popped. Thus, the extra word saves code to pop one word, which leads to
+more compact code. This trick saves about five percent.
+
+Exercise: Complete the calling sequence of the above printf call.
+Answer:
+	mov	_b,(sp)		/ use extra temporay word
+	mov	_a,-(sp)
+	mov	$fstring,-(sp)
+	jsr	pc,_printf
+	cmp	(sp)+,(sp)+	/ only need to pop two instead of three words.
+
+C functions use r5 as a base register when addressing items on the
+stack.
+
+Register r5 is not modified while the function is executed, whereas the
+stackpointer varies while pushing and popping temporary values. The
+fixed part of the stack is called a "frame", and r5 a "frame" pointer.
+A C-function with k word of automatic store establishes a frame
+on the stack with the following layout.
+
+FRAME:	temp1, autok, ..., auto1, r2c, ..., r5c, ra, arg1,..., argn
+	r5 = &r5c
+
+Exercise:
+Code the printf call assuming a and b are the only auto variables.
+Answer:
+	mov	-10.(r5),(sp)	/ b
+	mov	-8.(r5),-(sp)	/ a
+		...
+Exercise:
+Code the printf call assuming a and b are the only arguments of the caller:
+Answer:
+	mov	6.(r5),(sp)	/ b
+	mov	4.(r5),-(sp)	/ a
+		...
+
+To establish the return condition, a C functions jumps to cret.
+
+CRET-ENTRY:
+top of stack:	..., r2c, r3c, r4c, r5c, ra, arg1, arg2, ..., argn
+reg values:	r5 = &r5c; r0 = return value
+
+Note that the stack pointer does not occur in CRET-ENTRY, as is indicated
+by '...' at the top of stack. This means, that the stack pointer does not
+need to be adjusted to point to temp before jumping to cret.
+
+The exit condition of cret equals the return condition:
+CRET-EXIT = RET.
+
+The frame pointer is the head of a linked list of active frames.
+Assume C functions f0 calls f1 which calls f2 ...  which calls fn.
+Because r5 addresses the frame pointer of the caller, the FRAME
+condition implies the FRAME-LINK equations.  (* means --as in C-- the
+dereference operator.)
+
+FRAME-LINK:
+	      r5 = frame pointer of fn
+	     *r5 = frame pointer of fn-1 
+	    **r5 = frame pointer of fn-2 
+		...
+        **...*r5 = frame pointer of f0
+
+2.3.2 Long Jumps
+In C you can only "goto" a local label, that is you cannot jump into
+another function. Older languages, e.g. Pascal, support long jumps,
+so there seems to be a need for this feature.  With C, long jumps
+are provided by a pair of library routines, "setexit(III)" and
+"reset(III)". A precondition for calling reset() is that setexit() was
+called by a function that is still active. Then reset() jumps to the
+statement following setexit().
+
+In the following example the precondition is broken, since a() is not
+active when b() calls reset().
+
+a()
+{
+	b();
+	c();
+}
+
+b()
+{ 
+	setexit();
+}
+
+c()
+{
+	reset();
+}
+
+This example is correct but rather silly, it constitutes a
+nonterminating loop:
+
+a()
+{
+	setexit();
+	b();
+}
+
+b()
+{
+	reset();
+}
+
+The program loops, because b() is called after setexit() returns and
+after reset() jumps back. If this is not what you want, you need to
+descriminate both cases. According to the man page, after reset()
+jumps, all variables have the values they had when reset() was called
+(not when setexit() is called). Exploiting this lets you fix the
+program:
+
+a()
+{
+	int first;
+
+	first = 1;
+	setexit();
+	if (first) {
+		first = 0;
+		b();
+	}
+}
+
+b()
+{
+	reset();
+}
+
+
+Implementation of long jumps:
+
+For the following discussion assume
+	f0 calls setexit
+	f1 calls f2
+	   ...
+        fn calls reset
+
+Then reset has to establish f1's RET condition modified by ra being
+setexit's return address instead of f1's return address.  It does so by
+patching ra in f1's frame, establish CRET-ENTRY with r5 pointing to
+f1's frame and then jump to cret to establish the modified RET
+condition. To this end, setexit saves its frame pointer and its return
+address in global storage sr5 respective spc. The file s5/reset.s
+contains both reset and setexit:
+
+_setexit:
+	jsr     r5,csv
+	mov     r5,sr5
+	mov     2(r5),spc
+	jmp     cret
+
+_reset:
+        mov     sr5,r5
+        mov     spc,2(r5)
+        jmp     cret
+
+Exercise:
+Suppose reset() would restore r5 and then jump to cret without
+modifying 2(r5). What would happen then in the example program?
+
+Answer:
+Reset() would jump after b() instead of after setexit(), that is it
+would be a "nonlocal return".
+
+Exercise:
+Code an example such that reset breaks CRET-ENTRY.
+Answer:
+Setexit saves its FP in sr5. But to establish CRET-ENTRY, reset needs
+r5 to be set to f1's frame pointer!  So reset only works, if setexit's
+frame pointer = f1's frame pointer, that is if both frames happen to be
+at the same location. This is certainly not the case if f1 is called
+with at least two arguments.
+
+Want to fix reset()? Here it goes:
+reset() sets r5 to f1's frame pointer by exploiting the FRAME-LINK
+equations. Starting with the frame pointer of fn(), (which is r5), it
+dereferences until it gets at the frame pointer of f1(). Again from the
+FRAME-LINK equations you derive that r5 is the frame pointer of f1() if
+and only if:
+
+	*r5 = frame pointer of f0.
+
+Reset needs to check this condition, so setexit saves the frame pointer
+of f0 instead of its own frame pointer.
+
+Then, in C, the code would look like:
+
+	while (*r5 != sr5)
+		r5 = *r5;
+
+Translated to assembler, we arrive at a better version of reset:
+
+_reset:
+1:
+	cmp	*r5,sr5
+	beq	1f
+	mov	*r5,r5
+	br	1b
+1:
+	mov	spc,2(r5)
+	jmp	cret
+
+There is still another flaw with this version of reset. What happens,
+if f0() calls both setexit() and reset()? Then, the loop will miss f0's
+frame and run havoc going through the frames of f0's callers. When
+called from f(0), reset() must not restore any registers but return
+right away to spc. Here is reset.s with both fixes applied.
+
+.globl  _setexit
+.globl  _reset
+.globl  csv, cret
+
+_setexit:
+        jsr     r5,csv
+        mov     (r5),sr5
+        mov     2(r5),spc
+        jmp     cret
+
+_reset:
+        cmp     r5,sr5
+        bne     1f 	/ "1f" is the first label "1:" in forward direction.
+        mov     spc,(sp)
+        rts     pc
+1:
+        cmp     *r5,sr5
+        beq     1f
+        mov     *r5,r5
+        br      1b     / "1b" is the first label "1:" in backward direction.
+1:      
+        mov     spc,2(r5)
+        jmp     cret
+.bss
+sr5:    .=.+2
+spc:    .=.+2
+
+This version of reset() is still broken -- arguments passed to f1 are
+never popped.
+
+This program exhibits the error:
+main()
+{
+	setexit();
+	b(1, 2);
+}
+
+b(arg1, arg2)
+{
+	printf("address of arg1: 0%o\n", &arg1);
+	reset();
+}
+
+It prints:
+address of arg1: 0177744
+address of arg1: 0177742
+	...
+address of arg1: 022256
+address of arg1: 022254
+address of arg1: Memory fault -- Core dumped
+
+In Unix V7 long jumps are supported by the routines setjmp respective
+longjmp. They suffer from the same error.
+
+To fix this bug, reset needs to
+- make r2,r3,r4,r5 comply with f1's RET condition (as done before by cret)
+- make sp and pc comply with setexit's RET condition.
+
+To support this, setexit() additionally saves a complying stack pointer
+at ssp.
+
+A correct version of setexit/reset is:
+
+.globl  _setexit
+.globl  _reset
+
+_setexit:
+        mov     r5,sr5		/ f0's frame pointer
+        mov     (sp)+,spc	/ spc complies with RET condtion
+        mov     sp,ssp		/ sp and ssp comply with RET condtion
+        mov     spc,pc
+
+_reset:
+        cmp     r5,sr5	/ r5 = fn's frame pointer, sr5 = f0's frame pointer
+        bne     1f
+        br      2f	/ fn's FP == f0's FP => reset() called directly by f0.
+1:
+        cmp     (r5),sr5 / r5 = f1's FP ?
+        beq     1f
+        mov     (r5),r5
+        br      1b
+1:			 / r5 = f1's  FP.     
+        sub     $6,r5    / restore from f1's frame to make r2, r3, r4, r5
+        mov     (r5)+,r2 / comply with f1's RET condition.
+        mov     (r5)+,r3
+        mov     (r5)+,r4
+        mov     (r5),r5
+2:
+        mov     ssp,sp
+        mov     spc,pc  / sp and pc comply with setexit's RET condition.
+.bss
+sr5:    .=.+2
+spc:    .=.+2
+ssp:    .=.+2
+
+2.3.3 Signals
+Unix kernels provides "signals", which are similar to hardware interrupts or
+traps in that they can occur any time. A process is signalled because of
+- The process triggers a hardware trap, e.g. a MMU fault.
+- Another process executes the kill(II) system call.
+- The tty's ISR triggers a signal when it detects that the interrupt key (^?)
+  or the quit key (^\) is pressed.
+- The tty's ISR triggers a signal when it detects, that the telefone line
+  is hung up.
+
+There are fifteen different signals, numbered one (the hangup signal)
+to 15. For the details see signal(II). On default, a process that
+recieves a signal will terminate. The signal(II) system call lets a
+program specify to ignore a signal or that a user supplied function, a
+"signal service routine" (SSR), will be executed when a signal occurs.
+On return from the SSR the process will resume at the point it was
+interrupted.
+
+The following program prints something when the user presses ^?.
+
+main()
+{
+	int f();
+
+	signal(2, f);
+	for (;;);
+}
+
+f()
+{
+	printf("hi!\n");
+}
+
+After processing the signal, it is reset to the default reaction. In
+the above example, a second ^? will terminate the process.
+
+Below is a transcript showing how to send a signal to the process with
+the kill(I) command. The process is started in the background with its
+process id printed by the shell. This id is then used in the kill
+command to address the process.
+
+% a.out&
+527
+% kill -2 527
+
+% hi!
+kill -2 527
+% 
+
+The SSR is called asynchronously. To continue the process, all
+registers, including r0 and r1, and the condition flags need to be
+restored. Servicing a signal starts in kernel mode, where the process
+pushes the PSW and the the return address on the user mode stack. It
+reads both of them from the kernel stack, where they were saved by the
+last ISR. Before returning to user mode, the process patches the saved
+PC to point to a SSR wrapper, which is a library routine to be executed
+in user mode. The SSR wrapper pushes r0 and r1 on the stack, calls the
+SSR, pops r0 and r1 and continues the process by issuing an RTT
+instruction,thereby restoring PSW and PC as saved in kernel mode.
+
+In the following pci and pswi mean the values of those registers when
+the process was interrupted in user mode.
+
+WRAPPER-ENTRY:
+top of stack:	pci,pswi
+
+SSR-ENTRY:
+top of stack:	ra,r0c,r1c,pci,pswi
+
+SSR-RET:
+top of stack:	r0c,r1c,pci,pswi
+register:	r2,r3,r4,r5=r2c,r3c,r4c,r5c; pc=ra
+
+WRAPPER-RET:
+top of stack:	empty
+register:	r0,r1,r2,r3,r4,r5=r0c,r1c,r2c,r3c,r4c,r5c; pc=pci; psw=pswi
+
+Exercise:
+The wrapper routine additionally saves and restores r2,r3, and r4. Why?
+Answer:
+Don't know.
+
+Since signals, like interrupts, may occur at any time, the storage below
+the stack pointer might be overwritten at any time. So only the storage
+at [sp, n) is save. 
+
+Exercise: What's wrong with this version of csv?
+csv:
+	mov r5,r0
+	mov sp,r5
+	mov r4,-2(sp)
+	mov r3,-4(sp)
+	mov r2,-6(sp)
+	sub $8.,sp
+	jmp (r0)
+
+Two programs in Unix V6, namely cron and init, use the reset function
+as an SSR to catch hangup signals. The init process is the first
+user process. It waits for connections on terminal lines and
+starts login sequences. The terminals to be serviced are specified
+in /etc/ttys. A hangup signal causes init to reread the configuration file.
+This feature lets the administrator add or remove terminal lines
+without the need to reboot. The hangup signal became a popular technique
+to make server processes -- a.k.a "daemons" -- reconfigure themselves.
+Examples include httpd and inetd.
+
+Below is a typical scheme of a daemon controllable by hangup:
+	main()
+	{
+		setexit();
+		signal(1, reset);
+		init();
+		for (;;) {
+			job = wait_for_a_job();
+			do(job);
+		}
+	}
+
+This scheme is broken with our version of reset! Reset depends on
+the FRAME-LINK equations which might not be valid when the signal
+is caught.
+
+Exercise: Which condition from this chapter contradicts the FRAME-LINK
+equations?
+
+Answer: The CSV-ENTRY condition requires "r5=return address" whereas
+FRAME-LINK requires "r5=caller's frame pointer".
+
+Exercise: Point out the places in reset() that break the frame link
+condition.
+
+How is this to be fixed? The original reset does not depend on
+FRAME-LINK.  But it depends on f1's frame pointer = setexit's frame
+pointer, which is not guaranteed to even hold without signals. Unix
+V7's longjmp depends like our reset on FRAME-LINK, but it checks the
+frame pointer while dereferencing. If it's zero it stops searching for
+f1's frame and does the long jump without restoring r2, r3 and r4.
+Since I am not at all comfortable with this solution, the only way out
+seems to change the specification to something that can be
+implemented.  The problem lies in the fact that there is no way to
+compute f1's frame pointer which in turn is needed to restore r2, r3
+and r4, which might be allocated to register variables.
+
+The man page reads:
+	all accessable data have values as of the time reset was called.
+Weaken it by excluding register variables:
+	all accessable data except register variables have values as of
+	the time reset was called.
+
+This leads to code that is simpler and correct -- even with signals.
+
+
+But we have to check all functions that call setexit to make sure they
+don't depend on register being restored. Furthermore, all programs have
+to be rebuilt with the fixed setexit.
+
+The table lists sources that contain setexit.
+file		reset() in SSR		register 	was broken
+s1/cdb1.c	yes			no		yes
+s1/cron.c	yes			yes		yes
+s1/ed.c		yes			no		yes
+s1/init.c	yes			yes		yes
+s2/sh.c		no			yes		yes
+
+The column "register" indicates whether f0 accesses register variables
+after calling setexit() and thus are broken by the change of the
+specification. The column "was broken" indicates whether the original
+version of reset leads to an error -- either because setexit's frame
+pointer might differ from f1's frame pointer or because reset() might
+have been called by an SSR while in f0, which would overwrite the
+setexit's frame.
+
+Installing init and sh is not straight forward. Even as root you cannot
+overwrite /etc/init or /bin/sh, because both are active pure
+executables. And you probably don't want to overwrite them either -- if
+the new version wouldn't work, you cannot reboot the system. A somewhat
+safer strategy is to first rename the old versions and then install the
+new files.

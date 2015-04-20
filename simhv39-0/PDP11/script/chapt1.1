@@ -1,0 +1,122 @@
+1.1 Installing Unix V6
+The program product was the last one assembled manually. Unix was used
+to develop Unix so we'll use Unix to study Unix. For this, you first
+need to install a bootable binary disk from the distribution tape. The
+paper "SETTING UP UNIX-Sixth Edition" (filed in v6/doc/start.ps)
+explains usage of the secondary boot program. Use it to load "tmrk".
+"tmrk" copies blocks from tape to disk.  You can use ltap as the
+primary boot program, which loads the secondary boot from the
+distribution tape.  Before booting Unix from disk, set the SR to
+173030.  This will boot into single user mode, which is enough right
+now. After all, we only have a single terminal.
+
+SIMH: A version of the distribution tape suitable for SIMH is filed
+at v6/dist.tap.
+
+SIMH: Use "boot rk0" to load the first block from disk. You don't need
+to key in a primary boot program to boot from disk.
+
+SIMH: Use "set tto 7b" to set the output to seven bits per character.
+The SIMH setting defaults to eight bits per character and doesn't
+work, because the TTY driver sets bit 7 to a parity bit.
+
+The shell prompts you with "#" to enter commands. To use unix, you need
+to read the "Unix Programmer's Manual", see v6/doc/index.html.
+
+The TTY driver assumes an upper case only console. Use "stty -lcase" to
+teach it better. Another source of confusion might be the "change
+directory" command, which reads "chdir" in Unix V6 and not "cd" as in
+its successors.
+
+Notation: foo(number) references the manual page "foo" in man.number.ps
+For example stty(I), tty(IV) and chdir(I). The manual pages are provided
+as html pages as well, e. g., you find the stty page at
+	v6/doc/I/stty.html
+
+You want to verify the installation by running two file system checks,
+namely icheck(VIII) and dcheck(VIII).  Icheck checks that every block
+in a filesystem is either allocated to exactly one file or on the list
+of free blocks.  Dcheck verifies that every file has at least one
+name, i.e., an entry in a directory, and that the number of names of
+a file equals the link count stored with the file.
+
+Icheck and dcheck require a device name argument. Device names are
+directory entries much like names of regular files. They bind a name to
+a device, i.e., memory, terminal, tape or disk. Unlike regular file
+names, device names are created with mknod(VIII). It takes four
+arguments: the name of the device, conventionally an entry in the /dev
+directory; the type of the device (c for character, b for block); a
+major number, which identifies the device driver, and a minor number,
+which identifies one of the eight possibly attached disk drives.
+
+Device files are called "special files" as opposed to "regular files".
+
+The major number is an index to the driver's entry in either the
+"character device switch" (cdevsw) or the "block device switch"
+(bdevsw).  Both tables are written into the file /usr/sys/conf/c.c by a
+program called "mkconf".  "Mkconf" itself is distributed as a source
+file /usr/sys/conf/mkconf.c.  For the commands needed to build mkconf
+and c.c, consult the shell script "/usr/sys/run". It configures and
+builds the distribution kernels for a variety of hardware
+configurations.
+
+Besides c.c, mkconf creates the assembler program l.s, which defines
+the low memory part of the kernel, namely the trap and interrupt
+vectors, which is the yellow area. In other words, mkconf selects the
+drivers and creates the corresponding interrupt vectors as needed by a
+particular hardware configuration. When the kernel is linked, only
+drivers that are referred to in c.c, will be included.
+
+You only need to specify rk and tm to mkconf. Other devices, like the
+console driver or the memory, are included automatically by mkconf.
+
+Here is a typescript that creates mkconf, c.c and l.s:
+	# chdir /usr/sys/conf
+	# cc mkconf.c
+	# mv a.out mkconf
+	# mkconf
+	rk
+	tm
+	done
+	#
+
+From the c.c file we learn the assignement of major numbers to drivers:
+block devices		rk=0, tm=3,
+character devices:	kl=0, mem=8, rk=9, tm=12
+
+You are now ready to name the rk0 character device. Since character
+device in this case means the kernel does not do any "blocking", the
+name traditionally starts with an extra "r" for raw device.
+
+The typescript continued:
+# /etc/mknod /dev/rrk0 c 9 0
+
+And finally the filesystem checks:
+# icheck /dev/rrk0
+/dev/rrk0:
+spcl       5
+files    292
+large     95
+direc     24
+indir     95
+used    2902
+free    1011
+# dcheck /dev/rrk0
+/dev/rrk0:
+
+If your output looks similar to the above, you are ready for the completion
+of the installation:
+
+Create block and character device names for rk1 and tm0. The names of the
+tape device files are "/dev/mt0" and "/dev/rmt0", not "/dev/tm0". 
+
+Copy the source disk (blocks [4100, 8100) on tape) to /dev/rrk1.
+To copy blocks, use dd(I):
+	dd if=/dev/rmt0 of=/dev/rrk1 skip=4100 count=4000
+
+SIMH: Remember to attach rk1 before running the dd command.
+
+Now you are ready to mount(VII) the file system:
+	/etc/mount /dev/rk1 /usr/source
+
+Note that /etc/mount wants you to specifiy a block device.

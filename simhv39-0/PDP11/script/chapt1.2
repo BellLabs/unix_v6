@@ -1,0 +1,114 @@
+Chapter 1.2 Standalone Programs
+
+The secondary boot programs are used for two purposes:
+	- load programs that are needed to install Unix on a disk (e.g. tmrk)
+	- load the kernel
+
+But they are specified independendly of their original purpose,
+namely:
+
+	read the name of a program from the terminal
+	locate the blocks of the program by means of a directory
+	copy the blocks to memory starting at address 0
+	jsr pc,0
+
+Since the boot programs do just that, they can be used to load and start
+any program with origin = entry = 0. This blends nicely with the programs
+created by the assembler or the linkage editor. The boot programs don't
+touch the MMU and don't change the IPL. So, when loaded after power on, this
+means the MMU is turned of, the interrupts are blocked, and the CPU runs
+in kernel mode.
+
+The boot programs use an existing directory structure:
+On tape, it is the one be created by tp(I), on disk, it is the root
+directory of the file system. This design decision saves work:
+First, you don't have to think out another directory structure.
+Second, you don't have to provide programs that maintain that directory.
+
+There are no special purpose tools needed to build and install the boot
+programs themselves. Their sources are stored in /usr/source/mdec
+together with a shell script containing commands to build and install
+them in /usr/mdec.  The tp(I) and mkfs(I) commands install a boot
+program from /usr/mdec on the first block of the tape resp. the disk.
+
+"Install" means to put a machine program on disk or tape from which it
+can be loaded, i. e. copied to memory.
+
+To make the boot programs compatible to the rest of the system, two
+problems need to be solved:
+	- The boot program and the program to be loaded both occupy
+	  block zero of the memory, that is while loading, the boot program
+	  is writing over its own code.
+	- The file produced by the assembler has "a.out"-format.  That
+	  is, the file does not start with the machine program but
+	  with a 16 byte header, which is then followed by the machine
+	  program.  If this file including the header would be copied
+	  to memory at zero, origin and entry would be 20 (octal)
+	  instead of zero.
+
+The boot program solves the first problem by moving its own code from
+[0, 512) to [48K-512, 48K) before it starts loading another program.
+To make this work, the (short) part of the program that is used to move
+itself needs to be position independent, that is the code works
+regardless of its origin.  The whole program is assembled with the
+origin set to 48K-512.  How this is done, see section 9 of the
+assembler manual, where the usage of the "relocation counter" is
+described.  Why is the boot program moving itself just below 48K?  This
+is advertised as the minimum storage requirement for running Unix.  So,
+standalone programs including the kernel must not exceed 48K-512.  This
+sounds bad, but kernels in those days tend to be small.  For example,
+size(I) shows that code and data of a kernel including the tm and rk
+drivers occupies 24842 byte.
+
+The second problem is solved by the boot program: It first copies the
+standalone program to memory and checks if it starts with an a.out(V)
+header.  If so, it moves the program down 16 bytes before jumping to
+0.  In other words, it skips the a.out header.  The first word of the
+header is 407 (octal), which is used for the check.  407 happens to be
+the "br .+20" instruction, i.  e.  it jumps over the header.  So the
+primary boot program does not need to worry about the header of the
+secondary boot program.  But when the secondary boot program moves
+itself to upper memory, it skips its own program header, if it finds
+it. This is another reason for initial part of the boot program to be
+position independend:  It might be running with origin 0 or origin 16,
+depending on the presence of the a.out header.
+
+The boot system shows the traits of a typical Unix design:
+
+	There is little information transferred between boot - and booted
+	program, i.e.  the boot program "does not know" much about
+	the kernel, and thus works for any standalone program.
+
+	The kernel "does not know" the media and boot program by which it
+	was loaded and thus can be loaded from any tape or disk model.
+
+This "thin" interface helps to build flexible systems, saves you lines
+of code and hours of work as opposed to special purpose tools, i.e. a
+boot program with a fat interface to the kernel that can only be used
+to boot the kernel.
+
+Furthermore it is typical of well designed systems in general and Unix
+in particular to avoid special purpose tools. The same tools can be
+employed to build and install three quite different types of programs,
+namely
+
+	- Programs to be run under the control of the kernel
+	- standalone programs like the kernel or the install programs
+	- (secondary) boot programs
+
+Exercise:
+Create an assembler source of the sum1 program in Unix. Assemble and
+install it on disk and on (a new) tape. Load and start it from both
+media.  What needs to be changed in sum1 to make it work as a
+standalone program?
+
+Exercise:
+Assume the symbol l is defined as a label and the symbol n as an
+absolute number.  Labels are values relative to the origin whereas
+absolute numbers are --well-- absolute.  Which of the following
+statements are affected by setting the relocation counter to 1000?
+
+	mov	$l,r0
+	mov	$n,r0
+	mov	l,r0
+	mov	n,r0

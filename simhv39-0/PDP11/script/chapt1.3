@@ -1,0 +1,402 @@
+1.3 Maintaining userland software.
+					Es hat nicht soviel Tag im Jahr,
+				      wie der Fuchs am Schwanz hat Haar.
+					          Dieter Krebs, Sketchup
+
+This chapter shows how to maintain C written commands and the C library
+by fixing four time/date related bugs that cause trouble in modern
+times.
+
+1.3.0 Time and date in Unix.
+The date(I) command is used to display and set the current time, which
+is kept by the kernel in a longword as the number of seconds since
+00:00, Jan 1, 1970, Greenwich Mean Time (GMT). This number is
+incremented by the clock interrupt service routine ones every second.
+The time(II) and stime(II) system calls read and set the time using
+kernel representation. File modification and access times are stored in
+the kernel representation as well. Since this representation is
+independend of the local time, you don't have to adjust the time at two
+o' clock on sunday morning twice a year to account for daylight saving
+time.  And you don't have to adjust timestamps when exchanging files
+between Unix sytems in different timezones.
+
+The kernel representation encodes both date and time, that is you get
+both with one system call. This contrasts with other operating systems
+that provide separate calls for date and time, confusing programs that
+read the date just before midnight and the time just after midnight.
+
+Local time comes into play only when the date(I) command sets the time
+provided on the commandline or when programs like ls() display a
+timestamp. Displaying time and thus converting from internal
+representation to local time is encapsulated by the function ctime(III)
+in the C library. The date(I) command is the only place that converts
+from local time to kernel representation.
+
+The date command can't handle dates in the 21st century, that is it
+suffers from an ordinary year 2000 problem. This is easily fixed.
+Ctime() assumes the 20th century when printing a date, another simple
+Y2K problem. Furthermore, Ctime() uses a division that overflows when
+applied to dates younger than some day in 1999. This is somewhat harder
+to fix. The third bug we'll fix occurs in the find(I) command, when
+comparing timestamps in files with the current date.
+
+1.3.1 Making date() Y2K ready.
+
+You can find the source of the date command by typing
+	chdir /usr/source
+	find . -name "date.[cs]" -a -print
+It turns out that there is a file s1/date.c. We are lucky since we
+don't have to fix an assembler program, whose source files end in ".s".
+
+While setting the year, date(I) reads two digits from the command line
+assuming the 20th century.
+
+Exercise:
+Fix this, i.e., assume the 21st century if the year entered is less than
+fifty and the 20th century otherwise. Because date uses the buggy
+ctime(), it doesn't make sense yet to build and install the fix.
+
+1.3.2 Fixing ctime.
+The functions in ctime.c handle three different encodings of time:
+kernel-rep:	seconds in a longword, as used by the kernel
+array-rep:	seconds, minutes, hours, day of month, month, year in 
+		an array of integer. The entries of the array are
+		specified in the manual page ctime(III).
+ASCII-rep:	ASCII string like "Sun Feb  2 15:57:42 2003"
+
+Ctime() converts from kernel-rep to the ASCII-rep in two steps: It
+calls localtime() to convert from kernel-rep to array-rep and asctime()
+to convert from array-rep to ASCII-rep.
+
+Exercise:
+Like date(), asctime() is not Y2K ready. It prints "19" instead of "20"
+even so the year is in the 21st century. This is the second bug. Fix it.
+
+Localtime() subtracts the timezone offset from the kernel-rep to get a
+kernel-rep of local standard time. Then it calls gmtime() to convert
+from kernel-rep to array-rep. Localtime() finally uses the array-rep to
+decide whether daylight saving time is in effect. If so, it adds one
+hour to the kernel-rep and calls gmtime() again to get the array-rep of
+local time.
+
+Exercise:
+The time zone is initialized to represent EST (Eastern Standard Time).
+Change it and its name (in tzname) to represent your local time zone.
+Use "CET" and "CES" for the Central European Time and Central European
+Summer Time.
+
+Exercise:
+Eastern time switches to daylight saving time at last sunday in April
+and back to standard time at last sunday in October. Adapt this to
+the rules of your time zone.
+
+Gmtime() is the only place in Unix, that converts kernel-rep to
+array-rep.  And this is where the third bug lurks. The conversion is
+started by splitting the seconds in number of days before the current
+days and number of seconds in the current day, which is easily done by
+dividing the number of seconds by the number of seconds per day (spd).
+The quotient is the number of days before the current day and the
+remainder is the number of seconds in the current day.
+
+But spd is not an encodable integer, so gmtime() uses a trick:  It
+divides by seconds per eight hours instead. This works fine, as long as
+the quotient is an encodable integer, that is, less than 2^15.
+
+Exercise:
+Write a C-program that prints the last date before this quotient overflows.
+Use hmul(III) to compute the kernel-rep of that date.
+
+To fix the bug, let us code the function ulldiv(), that divides a long
+unsigned dividend by a long unsigned divisor, computing a long unsigned
+remainder and an unsigned quotient. Since in our case the divisor is
+greater than 2^16, the qotient is less than 2^16, so a word suffices to
+hold the quotient.
+
+The engineering of ulldiv() is separated in three steps:
+Step one: Derive an algorithm for division of nonnegative integers that
+only uses additive and compare operations assuming unlimited size
+of integers.
+
+Step two: Choose a representation of long integers in terms of the
+types provided by C.
+
+Step three: Code the additive and compare operations needed in ulldiv
+for the new data type.
+
+Step one: With m >= 0, n > 0 we are to compute q and r such that the
+post-conditions DIV0 and DIV1 hold:
+
+DIV0	m = q*n + r
+DIV1	0 <= r < n
+
+One technique of deriving a program is to weeken the post-condition such
+that they can easily be initialized and then to strengthen them in a loop.
+In this case, DIV1 is a candidate to be weekened to
+DIV1a:	0 <= r <= m. In the loop we then need to decrement r until DIV1 holds,
+while maintaining DIV0 and DIV1a.
+
+DIV0 and DIV1a hold with this initialization:
+	q = 0; r = m,
+We arrive at the algorithm:
+
+ullidv(m, n)
+int m, n;
+{
+	int q;
+	int r;
+
+	q = 0;
+	r = m; /* DIV0 and DIV1a hold and is maintained by the loop */
+	while (r >= n) {
+		q++;
+		r =- n;
+	}
+	/* DIV0 and DIV1a and r < n hold, which implies the post conditions */
+}
+
+Now, the above algorithm is correct but takes a long time if the
+quotient is large. This can be accelarated by doubling the amount to be
+subtracted each time. We introduce two variables nn and qq and replace
+the above loop by:
+
+	while (r >= n) {
+		qq = 1;
+		nn = n;
+		while (r >= nn) {
+			q =+ qq;
+			r =- nn;
+			qq =+ qq;
+			nn =+ nn;
+		}
+	}	
+
+In addition to DIV0 and DIV1a, the inner loop maintaines
+
+DIV2: nn = n * qq and  qq > 0
+
+Exercise:
+Prove, that
+a) DIV0, DIV1a and DIV2 hold before the inner loop.
+b) DIV0, DIV1a and DIV2 is maintained by the inner loop, that is if
+these conditions hold before an iteration, they hold after an interation.
+c) Both the inner and the outer loop terminate.
+
+This finishes step 1, which was highly influenced by a similar
+discussion from Edsgar W. Dijkstra in "A Discipline of Programming",
+1976, Prentice Hall, pp. 57-58.
+
+Step 2: The primitive types in C are the ones the PDP-11 offers, namely
+integers, pointers and bit arrays.  The compare operations provided by
+the integer type are useless for unsigned integers, so we build our
+long integer from pointers. In C, when you add an integer to a pointer,
+the integer is multiplied by the size of the object pointed to. This is
+not what we want, so we use "pointer to character" as our primitive
+type. The MUL and DIV instructions use long operands by storing the
+most significant word in the lower numbered register. We adopt this
+convention and store a long integer in an array of two words, starting
+with the high word. Time's kernel-rep also starts with the most
+significant word.
+
+So, this is how variables m, n that represent long unsigned integers
+are to be defined in C:
+
+	char *m[2], *n[2];
+
+The definition of ulldiv() reads:
+/* Unsigned division of long dividend m and long divisor n.
+ * Returns the low word of the quotient m/n.
+ * On return, the divisor will be set to the remainder m%n of the division.
+ */
+
+char *
+ulldiv(m, n)
+char *m[], *n[];
+{
+ 	...
+}
+
+The return type is unsigned integer, indicated by "char *".
+
+Step 3: The operations we need to implement for the new type
+unsigned long integer are:
+- lgeq(a, b), which returns 1 if a >= b and 0 otherwise.
+- ldec(a, b), which subtracts b from a, assuming b <= a.
+- ldouble(a), which doubles a.
+
+In C, when an argument is an array, the address of its first entry is
+passed to the function. This address is then used to change the
+argument.  On the opposite, when an integer or character is passed, a
+copy of the variable is accessed in the function's body, and changes to
+the parameter won't affect its value outside the function.  This
+"feature" is used by the definition of ulldiv, which changes the
+parameter n and  by ldec(a, b) and ldouble(a) which change a.
+
+The implementation of ldec() and lgeq() is straight forward, but
+ldouble(a) will overflow if a >= 2^31. In this case the inner loop of
+the above program is to be terminated, which is still correct since nn
+>= 2^31 implies 2*nn >= 2^32 > r.
+
+Here is an implementation of ldec(a, b):
+
+ldec(a, b)
+char *a[], *b[];
+{
+        register char **ra, **rb;
+
+        ra = a;
+        rb = b;
+        if (rb[1] > ra[1])
+                ra[0]--;
+        ra[0] =- rb[0];
+        ra[1] =- rb[1];
+}
+
+Exercise:
+Code ldouble(), lgeq() and ulldiv().
+
+Answer: In the file s4/ulldiv.c
+
+Exercise:
+Fix gmtime() by using ulldiv().
+
+1.3.3 Installing the fixes.
+We first compile the fixed library sources, that is s4/ctime.c and
+the new s4/ulldiv.c. Inspect the run shell script in s4 to see how
+to compile ctime.c. The compilation leaves object file ctime.o and
+ulldiv.o in s4. Objects are machine programs in a.out format.
+These objects are to be installed in the archive /lib/libc.a by means
+of the ar(I) command. Note, that the run script does not put the newly
+created objects into the archive. Use instead
+	ar rv /lib/libc.a ctime.o ulldiv.o
+
+The run script only recreates a new archive from the files in the old
+one.
+Now, we have to relink any command sources, that use ctime, localtime
+and gmtime.
+
+With find(I) and grep(I) you get a list of the affected programs.
+
+Sources that contain "localtime":
+s1/cron.c
+s1/date.c
+s2/sa.c
+s2/tp3.s
+
+Sources that contain "ctime":
+s1/date.c
+s1/dump.c
+s1/ln.c (does not call ctime, contains the string ctime only)
+s1/ls.c
+s2/mail.c
+s2/pr.c
+s2/prof.c
+s2/ps.c
+s2/restor.c
+s2/sa.c
+s2/who.c
+s7/nroff1.s
+fort/rt2/ctime.s (does not call ctime)
+
+Neither "gmtime" nor "asctime" occure in any source file besides
+ctime.c.
+
+Again, inspect run in the source subdirectories to find the command line
+for building and installing the program:
+For example you rebuild date by:
+	cc -s -O date.c
+	cp a.out /bin/date
+
+The cc command controls the building of C programs.  First it invokes
+the two phases and the optimizer (caused by the -O flag) of the C
+compiler which translate from C to assembler language. cc then calls
+the assembler to produce a machine program.  Finally, cc invokes the
+link editor ld, passing among others the "-s" flag, which means that ld
+should discard the symbol table and relocation table. ld searches the
+archive /lib/libc.a for objects that define unresolved symbols and
+includes them in the resulting a.out.
+
+Rebuilding and reinstalling all of the above commands finishes these fixes.
+
+1.3.3 Fixing find's trouble with old timestamps in files.
+Unix V6 records two timestamps for each file. One timestamp tells when
+the file was modified the last time and the other tells when the file's
+content was accessed the last time.  The kernel representations of
+these timestamps are stored in the inode, which a user program like ls
+reads with the stat(II) system call. The "-l" flag tells ls(I) to print
+the modification time while the -lu flag prints the usage time. The
+modification time is updated when the content or the inode is changed.
+The usage time is updated only when the content is read, not when the
+inode is read.  In the V7 filesystem, a third timestamp reflects
+modification of the inode and the modification time is set only when
+the content is modified.
+
+Exercise: What would ls -lu show, if the file's access time would be
+updated each time the files content or its inode is read?
+
+
+The -mtime and -atime flags of find(I) select files on account of their
+timestamps.  Let t be the timestamp, n the current time, spd the number
+of seconds per day and d a number. Then the condition checked is
+specified by the following table.
+
+	    commandline flag	  file qualifies, if
+		-mtime d	(n-t)/spd = d
+		-mtime -d	(n-t)/spd < d
+		-mtime +d	(n-t)/spd > d
+
+Exercise: Checking the condition would be easier when you'll have to
+code a multiplication instead of a division:
+		-mtime d	(n-f) = d*spd
+What's wrong with that?
+
+Very similar to gmtime(), find() has to implement somehow a division of
+a longword by a longword.
+
+But find() uses a different technique: With the longword s = n-t it
+approximates the quotient by s[0]*3/4.  That is, instead of dividing by
+spd = 86400, find computes (s/2^16)*3/4 = s/(87381+1/3).  Note, that
+the last equation assumes division of real numbers instead of
+integers.
+
+This trick suffers from two problems with really old timestamps, as
+they occure nowadays with files that were not touched since 1975:
+
+- the error done by the approximation gets larger
+- worse yet, s[0]*3 will overflow 
+
+Exercise: What is the smallest s such that s[0]*3/4 != s/spd?
+
+Exercise: Compute s such that s/spd - s/(87381+1/3) = 1, assuming
+real numbers. 7693356.5217393888
+
+Exercise: Write a program that prints the smallest s such that the
+error introduced by the approximation grows to two.
+
+Exercise: The oldest timestamps in the V6 distribution are from May 14,
+1975.  Give an approximation of the current year when find's technique
+starts overflowing when being applied to these old files.
+
+The fix is made easy by ulldiv():  ndays() returns the number of days
+since the timestamp t. The external array now holds the current time.
+
+	int
+	ndays(t)
+	char *t[2];
+	{
+	        char *spd[2]; /* seconds per day */
+	        char *dt[2];  /* delta t */
+	
+	        spd[0] = 1; spd[1] = 20864;
+	        dt[0] = now[0]; dt[1] = now[1];
+
+	        ldec(dt, t);
+	        return ulldiv(dt, spd);
+	}
+
+Exercise:
+Repair find() so it checks correctly old timestamps and install your fix.
+
+Both the gmtime() and find() problems were fixed when C supplied the
+type "long int".  Anyway, no matter how large the primitive types
+offered by a language are, there are always situations you need larger
+ones.

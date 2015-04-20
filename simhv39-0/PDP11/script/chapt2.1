@@ -1,0 +1,202 @@
+Chapter 2.1 Memory Management Unit and Multiprocessing
+
+The MMU lets the software define the mapping of virtual addresses to
+physical addresses, a.k.a. bus addresses.
+
+2.1.0 What is the MMU good for?
+The reasons to use an MMU include:
+- Access more memory:
+  Without an MMU, the PDP-11 CPU can access 2^16 bytes, which is the
+  number of virtual addresses. With an MMU, the PDP-11 can access 2^18
+  bytes, which is the number of bus addresses. Because of two extra
+  address bits, DEC gave an MMU to the PDP-11 -- three years after its
+  birth. The alternative, which is to widen the virtual addresses,
+  turns out to be much more expensive: it affects the width of the
+  general registers and nearly every machine instruction. It took DEC
+  another three years to introduce a PDP-11 with 32 bit virtual
+  addresses. The changes were drastic enough to justify a new family
+  name for 32-bit PDP-11, namely VAX (Virtual Address eXtension). On
+  all modern architecures, the number of virtual addresses exceeds
+  the size of installed memory, so the original incentive using an
+  MMU disappeared.
+
+- Relocation:
+  If you want to load more than one program they have to be assigned to
+  non overlapping memory ranges, leading to different origins.
+  Addresses relative to the origin thus need to be adjusted. The MMU is
+  exploited to avoid this by mapping identical virtual address ranges
+  to different bus addresses. This is also called hardware relocation.
+  Compare this to secondary boot programs, where the relocation is done
+  by the assembler.
+
+- Protection: 
+  A program can only access memory that it can address. To protect
+  memory (or device registers) from a process, don't let the MMU map to
+  it.
+
+2.1.1 The MMU of the PDP-11
+The virtual address range is devided into eight  8K pages.  The mapping
+of a page is controlled by its page address register and its page
+description register (PAR0 - PAR7 and PDR0 - PDR7). The page address
+register contains a click number, a click being a range of 64 bus
+addresses. The 64 byte click can be viewed as the unit of memory
+mapping and allocation.
+
+The PDR contains the following subfields:
+size	number of clicks in lower part less one, range: [0, 128).
+	the lower part is [0, size], the upper part is [size, 128).
+upart	A boolean, meaning upper (if true) or lower part of page is mapped.
+racc	A boolean, meaning read access allowed.
+wacc	A boolean, meaning write access allowed.
+
+With MMU turned off a hardwired mapping is in effect, which maps the
+first seven pages to the identical bus addresses, and the last, the I/O
+page, is mapped to the last page of bus addresses. All addresses grant
+read/write permissions.
+
+Exercise:
+Describe the contents of the paging registers such that the MMU
+emulates the hardwired address mapping.
+
+Just as there are two stack pointers, there are two sets of paging
+register, one active in kernel mode, one active in user mode.
+
+There are two instructions that let you access words as if in previous
+mode(PM):
+
+	move to previous space (mtpi)
+	move from previous space (mfpi).
+
+These instructions take one operand specification. They pull respective
+push a word using the current mode stack, and write respective read the
+operand.  If the operand is a memory word, its address is translated
+using the paging registers from the PM, if the operand is the stack
+pointer, the one active in previous mode is accessed.
+
+Exercise:
+When executed in user mode, the RTI instruction won't set the PM field
+to kernel mode when restoring the PSW. Why is this important for Unix?
+
+After power on, all 32 paging registers are set to zero.
+
+The MMU executes a "segmentation fault trap" if memory is accessed
+through virtual addresses that are not mapped or don't have the
+appropiate read/write permissions.
+
+2.1.2 The storage segments of a machine program.
+A machine program as stored in an a.out format consists of three segments:
+- A text segment, containing the program code.
+- A data segment, containing explicitly initialized data.
+- A bss segment, representing implicitly initialized data. 
+
+The data represented in the bss segment will all be initialized to zero
+when the program is loaded. Since its dull to store zeroes, the bss
+segment is not written to the a.out file.
+
+The C language puts string constants, global and local static variables
+into these segments. The location of these data is fixed for the
+lifetime of the program. On the contrary, storage for local nonstatic
+variables is allocated dynamically on the stack. Storage to these
+variables is allocated when the subroutine is called and freed when the
+subroutine returns.
+
+The data and bss segment are seperated only in the a.out structure.
+When the program is loaded, there is only one combined data segment.
+
+The a.out format specifies two types of programs, the type "executable"
+which is the format of the boot and standalone programs and the type
+"pure executable". Text and data segment of an ordinary executable is
+layed out contiguously in terms of its virtual addresses, whereas the
+data segment of a pure executable continues at the next page boundary
+after the text segment.  The pure layout lets you control the mapping
+of the data segment independently from the mapping of the text segment.
+
+Exercise:
+Three pure executables have text segments with the sizes 
+	a) 16K-2
+	b) 16K
+	c) 16K+2
+Where do the data segments start?
+
+The machine programs of both types of executables are built relative to
+origin zero.
+
+The a.out header contains the sizes of each segment. They can be printed
+by the size(I) command. For a small V6 kernel it prints
+	23460+1382+15438=40280 (116530)
+These decimal numbers are the sizes in bytes of the text, data and bss
+segments and its sum. For the octal addict the sum is given in octal
+notation as well.
+
+The file(I) of V6 command prints "executable" and "pure executable" to
+indicate the type of the file.
+
+2.1.3 Kernel mode address mapping
+The kernel, like all standalone programs, is an ordinary executable.
+
+Before the kernel turns on the MMU, it needs to set up the MMU kernel
+mode paging registers.
+
+Exercise:
+Guess what happens if the MMU is turned on but the pageing registers were
+left as they are after power on?
+
+The mapping of all but page six is set up to emulate the hardwired
+mapping.  From page six, only the lower 1K addresses are mapped to
+memory. This is allocated to the "user block", which contains per
+kernel process data, namely the "user" structure (290 Byte) and the
+kernel stack. Despite its name, the user block is addressable only in
+kernel mode.
+
+Exercise:
+What do you think is the initial value of the kernel stack pointer?
+
+A user block is allocated to each process. During a context switch,
+PAR6 is updated so it points to the user block of the next process. The
+other kernel mode paging registers are not modified after
+initialization. Text and data segment are shared among the kernel
+processes.
+
+The part of the user state that needs to be restored on return to user
+mode is saved on the kernel stack, that is, in the user block.
+Furthermore, copies of the user mode paging registers are kept in the
+user block. In course of a context switch, these registers are
+reloaded.  This way, the contents of the user block control which of
+the user processes will be continued by the RTI instruction.
+
+2.1.4 User mode address mapping
+As opposed to kernel mode, storage is not shared in user mode.  This
+keeps the hard stuff related to shared memory confined to kernel code.
+
+Starting with page 0, the addresses are mapped to include just enough
+clicks for text and data. For ordinary executables, the PDRs are set to
+map the lower part with read/write permission. For pure executables,
+the text segment is mapped with read only permission, the data segment
+with read/write permission. Since a text segment is not modifyable, it
+can be shared among processes executing the same program, without
+introducing shared memory complications to user land.
+
+In both types the upper part of page 7 is mapped to memory allocated to
+the user mode stack. Initially, 20 memory clicks are allocated to the
+user stack. Naturally, read/write permission is turned on for the
+stack.
+
+Exercise:
+Determine the initial value of the user stack pointer.
+
+Since addresses just below the stack are not mapped, a stack overflow
+will effect a segmentation fault. The trap routine then tries to
+allocate more memory to the user stack; reprograms the user paging
+registers to account for the larger stack, undoes any modifications to
+the registers that were side effects of the trapped instruction and
+returns to the user process, with the PC pointing to the offending
+instruction, thus reexecuting it with a greater stack.  The MMU
+supports this task by leaving the PC of the trap causing instruction in
+a special MMU register.
+
+Exercise:
+Determine the initial value of the size field in PDR7.
+
+To allow for dynamic storage allocation, Unix provides the brk(II)
+system call. It moves the break between mapped and unmapped addresses
+effectively changing the size of the data segment.
